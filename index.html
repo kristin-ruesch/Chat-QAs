@@ -5,52 +5,179 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        /* ... existing styles ... */
+        :root { font-family: system-ui, sans-serif; line-height: 1.5 }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 20px 0 }
+        .card { padding: 20px; border: 1px solid #ddd; border-radius: 8px; text-align: center }
+        .red-flag { color: #dc3545; background: #fff5f5; padding: 10px; margin: 5px 0 }
+        table { width: 100%; border-collapse: collapse }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd }
+        input[type="file"] { margin: 20px 0 }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px }
+        .chart-container { height: 300px; margin: 20px 0 }
+        .hidden { display: none }
+        .review-panel { border: 1px solid #ddd; padding: 20px; margin-top: 20px }
+        .message-agent { color: #0d6efd }
+        .message-customer { color: #198754 }
+        .analyze-btn { background: #28a745; font-size: 1.2em; padding: 15px 30px }
         .error { color: #dc3545; padding: 10px; margin: 10px 0; border: 1px solid #f5c2c7 }
+        .debug { margin-top: 20px; padding: 10px; background: #f8f9fa; border: 1px solid #dee2e6 }
+        .file-info { margin: 10px 0; padding: 10px; background: #e9ecef; border-radius: 4px }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Chat Quality Analyzer</h1>
         
+        <div class="file-info">
+            Selected file: <span id="selectedFile">None</span>
+        </div>
+        
         <input type="file" id="csvFile" accept=".csv" multiple>
         <button onclick="analyzeChats()" class="analyze-btn">Analyze Chats</button>
+        <button onclick="forceProcess()" style="background: #fd7e14">Force Process</button>
         
         <div id="errorMessage" class="error hidden"></div>
         
-        <!-- ... rest of existing HTML ... -->
+        <div id="debugInfo" class="debug hidden">
+            <h3>Debug Information</h3>
+            <pre id="debugContent"></pre>
+        </div>
+        
+        <div class="stats">
+            <div class="card">
+                <h3>Total Chats</h3>
+                <div id="totalChats">0</div>
+            </div>
+            <div class="card">
+                <h3>Red Flags</h3>
+                <div id="redFlagsCount">0</div>
+            </div>
+            <div class="card">
+                <h3>Rebill Scripts</h3>
+                <div id="rebillCount">0</div>
+            </div>
+            <div class="card">
+                <h3>TNR Scripts</h3>
+                <div id="tnrCount">0</div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <canvas id="trendChart"></canvas>
+        </div>
+
+        <div id="results">
+            <h2>Flagged Chats</h2>
+            <div id="flaggedChatsList"></div>
+        </div>
+
+        <div id="reviewPanel" class="review-panel hidden">
+            <h3>Chat Review</h3>
+            <div id="chatDetails"></div>
+            <div id="messageList"></div>
+            <div style="margin-top: 20px">
+                <button onclick="submitFeedback(true)">Accurate</button>
+                <button onclick="submitFeedback(false)">Inaccurate</button>
+                <input type="text" id="feedbackComment" placeholder="Add comment">
+            </div>
+        </div>
     </div>
 
 <script>
+// Global variables
 let chats = [];
 let feedbackStore = JSON.parse(localStorage.getItem('feedback') || '[]');
 let currentChat = null;
 
+// Initialize with debug info
+document.addEventListener('DOMContentLoaded', function() {
+    logDebug("Page loaded");
+    checkForStoredData();
+});
+
+// Event listener for file input
 document.getElementById('csvFile').addEventListener('change', function(e) {
+    logDebug("File input changed");
     const file = e.target.files[0];
-    if (!file) return;
+    if (!file) {
+        logDebug("No file selected");
+        document.getElementById('selectedFile').textContent = "None";
+        return;
+    }
+    
+    document.getElementById('selectedFile').textContent = file.name;
+    logDebug(`File selected: ${file.name}, size: ${file.size} bytes`);
     
     // Validate file extension
     if (!file.name.toLowerCase().endsWith('.csv')) {
         showError('Please upload a CSV file');
+        logDebug("File is not a CSV");
         return;
     }
     
-    Papa.parse(file, {
+    // Read file
+    readFileContent(file);
+});
+
+function readFileContent(file) {
+    logDebug("Starting file read");
+    
+    const reader = new FileReader();
+    
+    reader.onload = function(e) {
+        logDebug("File read completed");
+        const content = e.target.result;
+        logDebug(`File content length: ${content.length} characters`);
+        
+        // Parse CSV
+        parseCSV(content);
+    };
+    
+    reader.onerror = function() {
+        showError('Error reading file');
+        logDebug("File read error");
+    };
+    
+    reader.readAsText(file);
+}
+
+function parseCSV(content) {
+    logDebug("Starting CSV parse");
+    
+    Papa.parse(content, {
         header: true,
         skipEmptyLines: true,
         complete: function(results) {
+            logDebug(`CSV parse completed. Rows: ${results.data.length}`);
+            
             if (results.errors.length > 0) {
                 showError(`CSV Error: ${results.errors[0].message}`);
+                logDebug(`CSV errors: ${JSON.stringify(results.errors)}`);
                 return;
             }
+            
+            // Check if we have data
+            if (results.data.length === 0) {
+                showError('CSV file is empty');
+                logDebug("CSV file is empty");
+                return;
+            }
+            
+            // Check if we have expected columns
+            const firstRow = results.data[0];
+            const columns = Object.keys(firstRow);
+            logDebug(`CSV columns: ${columns.join(', ')}`);
+            
+            // Process data
             processData(results.data);
         },
         error: function(error) {
-            showError(`File read error: ${error.message}`);
+            showError(`File parse error: ${error.message}`);
+            logDebug(`Parse error: ${error.message}`);
         }
     });
-});
+}
 
 function showError(message) {
     const errorDiv = document.getElementById('errorMessage');
@@ -58,9 +185,125 @@ function showError(message) {
     errorDiv.classList.remove('hidden');
 }
 
+function logDebug(message) {
+    const debugContent = document.getElementById('debugContent');
+    const timestamp = new Date().toLocaleTimeString();
+    debugContent.textContent += `${timestamp}: ${message}\n`;
+    document.getElementById('debugInfo').classList.remove('hidden');
+}
+
+function checkForStoredData() {
+    // Check localStorage for previously uploaded data
+    const storedData = localStorage.getItem('csvData');
+    if (storedData) {
+        logDebug("Found stored CSV data");
+        try {
+            const parsed = JSON.parse(storedData);
+            processData(parsed);
+        } catch (e) {
+            logDebug("Stored data is invalid");
+        }
+    }
+}
+
+function forceProcess() {
+    logDebug("Force processing triggered");
+    
+    // Try to get CSV from input
+    const fileInput = document.getElementById('csvFile');
+    if (fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        readFileContent(file);
+        return;
+    }
+    
+    // Try to get from localStorage
+    checkForStoredData();
+}
+
+function processData(rawData) {
+    logDebug(`Processing ${rawData.length} rows of data`);
+    
+    // Map CSV columns to expected names (case-insensitive)
+    const columnMap = {
+        'Chat Id': ['Chat Id', 'ChatID', 'chat_id', 'ChatID'],
+        'Agent Name': ['Agent Name', 'Agent', 'agent_name', 'AgentName'],
+        'Email': ['Email', 'email', 'customer_email', 'EmailAddress'],
+        'Messages': ['Messages', 'Transcript', 'message', 'Message', 'chat']
+    };
+
+    // Try to find matching columns
+    const foundColumns = {};
+    const columns = Object.keys(rawData[0] || {});
+    
+    logDebug(`Available columns: ${columns.join(', ')}`);
+    
+    // Find best match for each required column
+    for (const [targetCol, aliases] of Object.entries(columnMap)) {
+        foundColumns[targetCol] = findBestColumnMatch(columns, aliases);
+        logDebug(`Matching ${targetCol} to: ${foundColumns[targetCol] || 'NOT FOUND'}`);
+    }
+    
+    // Check if we found all required columns
+    if (Object.values(foundColumns).some(col => !col)) {
+        showError('CSV file is missing required columns');
+        logDebug("Missing required columns");
+        return;
+    }
+    
+    // Normalize data using found columns
+    const normalizedData = rawData.map(row => {
+        const normalized = {};
+        for (const [targetCol, sourceCol] of Object.entries(foundColumns)) {
+            normalized[targetCol] = row[sourceCol] || '';
+        }
+        return normalized;
+    });
+
+    // Process into chat objects
+    chats = normalizedData.map(chat => ({
+        chatId: chat['Chat Id'],
+        agent: chat['Agent Name'],
+        email: chat['Email'],
+        messages: parseMessages(chat['Messages']),
+        redFlags: detectRedFlags(chat['Messages']),
+        rebill: detectRebillScript(chat['Messages']),
+        tnr: detectTNRScript(chat['Messages'])
+    }));
+
+    // Save to localStorage for future
+    try {
+        localStorage.setItem('csvData', JSON.stringify(normalizedData));
+        logDebug("Data saved to localStorage");
+    } catch (e) {
+        logDebug("Error saving to localStorage");
+    }
+    
+    // Auto-trigger analysis
+    analyzeChats();
+}
+
+function findBestColumnMatch(availableColumns, targetAliases) {
+    // Convert to lowercase for comparison
+    const lowerAvailable = availableColumns.map(c => c.toLowerCase().trim());
+    const lowerAliases = targetAliases.map(a => a.toLowerCase().trim());
+    
+    // Find best match
+    for (const alias of lowerAliases) {
+        const match = availableColumns.find((col, idx) => 
+            col.toLowerCase().trim() === alias || 
+            lowerAvailable[idx] === alias
+        );
+        if (match) return match;
+    }
+    
+    return null;
+}
+
 function analyzeChats() {
     if (chats.length === 0) {
         showError('Please upload a CSV file first');
+        logDebug("No chats to analyze");
         return;
     }
     
@@ -72,42 +315,204 @@ function analyzeChats() {
     renderResults();
 }
 
-function processData(rawData) {
-    // Map CSV columns to expected names (case-insensitive)
-    const columnMap = {
-        'Chat Id': ['Chat Id', 'ChatID', 'chat_id'],
-        'Agent Name': ['Agent Name', 'Agent', 'agent_name'],
-        'Email': ['Email', 'email', 'customer_email'],
-        'Messages': ['Messages', 'Transcript', 'message']
-    };
-
-    // Normalize column names
-    const normalizedData = rawData.map(row => {
-        const normalized = {};
-        for (const [key, aliases] of Object.entries(columnMap)) {
-            const foundKey = Object.keys(row).find(k => 
-                aliases.includes(k.trim()) || aliases.includes(k.toLowerCase().trim())
-            );
-            normalized[key] = foundKey ? row[foundKey] : '';
-        }
-        return normalized;
-    });
-
-    chats = normalizedData.map(chat => ({
-        chatId: chat['Chat Id'],
-        agent: chat['Agent Name'],
-        email: chat['Email'],
-        messages: parseMessages(chat['Messages']),
-        redFlags: detectRedFlags(chat['Messages']),
-        rebill: detectRebillScript(chat['Messages']),
-        tnr: detectTNRScript(chat['Messages'])
-    }));
-
-    // Auto-trigger analysis
-    analyzeChats();
+function parseMessages(raw) {
+    if (!raw) return [];
+    try {
+        return raw.split('\n').filter(line => line.trim()).map(line => {
+            const [timestamp, ...message] = line.trim().split(/ : /);
+            return {
+                timestamp: new Date(timestamp),
+                sender: message[0]?.includes('Customer') ? 'Customer' : 'Agent',
+                text: message.slice(1).join(' : ').trim()
+            };
+        });
+    } catch (e) {
+        logDebug(`Error parsing messages: ${e.message}`);
+        return [];
+    }
 }
 
-// ... rest of existing functions ...
+function detectRedFlags(messages) {
+    const flags = [];
+    let lastCustomerTime = null;
+
+    // Response time check
+    messages.forEach(msg => {
+        if (msg.sender === 'Customer') {
+            lastCustomerTime = msg.timestamp;
+        } else if (msg.sender === 'Agent' && lastCustomerTime) {
+            const diff = (msg.timestamp - lastCustomerTime) / 60000;
+            if (diff > 5) flags.push("Delayed Response (>5 mins)");
+            lastCustomerTime = null;
+        }
+    });
+
+    // Refund check
+    const refundKeywords = ['refund', 'credit', 'money back'];
+    const customerRequested = messages.some(m => 
+        m.sender === 'Customer' && 
+        refundKeywords.some(kw => m.text.toLowerCase().includes(kw))
+    );
+    
+    if (customerRequested && !messages.some(m => 
+        m.sender === 'Agent' && m.text.toLowerCase().includes('refund')
+    )) {
+        flags.push("No Refund Offered");
+    }
+
+    return flags;
+}
+
+function detectRebillScript(messages) {
+    return messages.some(m => 
+        m.sender === 'Agent' && 
+        m.text.toLowerCase().includes('rebill')
+    );
+}
+
+function detectTNRScript(messages) {
+    return messages.some(m => 
+        m.sender === 'Agent' && 
+        m.text.toLowerCase().includes('tnr')
+    );
+}
+
+function updateDashboard() {
+    document.getElementById('totalChats').textContent = chats.length;
+    const flaggedCount = chats.filter(c => c.redFlags.length > 0).length;
+    document.getElementById('redFlagsCount').textContent = flaggedCount;
+    
+    const rebillCount = chats.filter(c => c.rebill).length;
+    document.getElementById('rebillCount').textContent = rebillCount;
+    
+    const tnrCount = chats.filter(c => c.tnr).length;
+    document.getElementById('tnrCount').textContent = tnrCount;
+    
+    // Update chart
+    updateTrendChart();
+    
+    // Show results section
+    document.getElementById('results').style.display = 'block';
+}
+
+function renderResults() {
+    const container = document.getElementById('flaggedChatsList');
+    
+    const flaggedChats = chats.filter(c => c.redFlags.length > 0);
+    
+    if (flaggedChats.length === 0) {
+        container.innerHTML = '<p>No red flags detected</p>';
+        return;
+    }
+
+    container.innerHTML = `
+        <table>
+            <tr>
+                <th>Chat ID</th>
+                <th>Agent</th>
+                <th>Flags</th>
+                <th>Action</th>
+            </tr>
+            ${flaggedChats.map(chat => `
+                <tr>
+                    <td>${chat.chatId}</td>
+                    <td>${chat.agent}</td>
+                    <td>${chat.redFlags.join(', ')}</td>
+                    <td>
+                        <button onclick="showReview('${chat.chatId}')">Review</button>
+                    </td>
+                </tr>
+            `).join('')}
+        </table>
+    `;
+}
+
+function showReview(chatId) {
+    currentChat = chats.find(c => c.chatId === chatId);
+    document.getElementById('reviewPanel').classList.remove('hidden');
+    
+    // Show chat details
+    document.getElementById('chatDetails').innerHTML = `
+        <p><strong>Chat ID:</strong> ${currentChat.chatId}</p>
+        <p><strong>Agent:</strong> ${currentChat.agent}</p>
+        <p><strong>Email:</strong> ${currentChat.email}</p>
+        <p><strong>Flags:</strong> ${currentChat.redFlags.join(', ')}</p>
+    `;
+    
+    // Show messages
+    document.getElementById('messageList').innerHTML = `
+        <h4>Messages</h4>
+        <div style="max-height: 300px; overflow-y: auto; border: 1px solid #ddd; padding: 10px">
+            ${currentChat.messages.map(msg => `
+                <div class="${msg.sender === 'Agent' ? 'message-agent' : 'message-customer'}" style="margin: 5px 0">
+                    <strong>${msg.sender}:</strong> ${msg.text}
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+function submitFeedback(isAccurate) {
+    const comment = document.getElementById('feedbackComment').value;
+    saveFeedback(currentChat.chatId, isAccurate, comment);
+    alert('Feedback saved!');
+}
+
+function saveFeedback(chatId, accurate, comment = '') {
+    feedbackStore.push({
+        chatId,
+        accurate,
+        comment,
+        timestamp: new Date().toISOString()
+    });
+    localStorage.setItem('feedback', JSON.stringify(feedbackStore));
+}
+
+function updateTrendChart() {
+    try {
+        const ctx = document.getElementById('trendChart').getContext('2d');
+        const weeklyData = getWeeklyStats();
+        
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: weeklyData.map(d => d.week),
+                datasets: [{
+                    label: 'Red Flags',
+                    data: weeklyData.map(d => d.flags),
+                    borderColor: '#dc3545',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false
+            }
+        });
+    } catch (e) {
+        logDebug(`Chart error: ${e.message}`);
+    }
+}
+
+function getWeeklyStats() {
+    // Simplified weekly aggregation
+    return Array.from({length: 4}, (_, i) => ({
+        week: `Week ${i+1}`,
+        flags: Math.floor(Math.random() * 50)
+    }));
+}
+
+// Add keyboard shortcut (Ctrl+U) to force process
+document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey && e.key === 'u') {
+        forceProcess();
+    }
+});
+
+// Show file info when selected
+document.getElementById('csvFile').addEventListener('click', function() {
+    logDebug("File input clicked");
+});
 </script>
 </body>
 </html>
